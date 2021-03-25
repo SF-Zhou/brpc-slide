@@ -1,75 +1,163 @@
 ---
 marp: true
-title: Marp CLI example
-description: Hosting Marp slide deck on the web
-theme: uncover
+title: bRPC Implementation
+theme: gaia
+_class: lead
+backgroundImage: url('./assets/hero-background.jpg')
 paginate: true
-_paginate: false
 ---
 
-![bg](./assets/gradient.jpg)
+![bg left:30% 70%](./assets/logo.png)
 
-# <!--fit--> Marp CLI example
+# **bRPC**
 
-Hosting Marp slide deck on the web
+**An industrial-grade RPC framework**
 
-https://github.com/yhatt/marp-cli-example
-
-<style scoped>a { color: #eee; }</style>
-
-<!-- This is presenter note. You can write down notes through HTML comment. -->
+https://github.com/apache/incubator-brpc
 
 ---
 
-![Marp bg 60%](https://raw.githubusercontent.com/marp-team/marp/master/marp.png)
+# Core Features
+
+- Memory Management
+  * Object Pool
+  * ABA Problem
+- **M:N** Thread
+  * Work Stealing
+  * Butex
+- Single Connection
+  * Wait-free Read/Write
 
 ---
 
-![bg](#123)
-![](#fff)
+# Memory Management
 
-##### <!--fit--> [Marp CLI](https://github.com/marp-team/marp-cli) + [GitHub Pages](https://github.com/pages) | [Netlify](https://www.netlify.com/) | [Vercel](https://vercel.com/)
+Object Pool & Resource Pool
+1. Thread Local First
+2. **Never Release**!
 
-##### <!--fit--> 👉 The easiest way to host<br />your Marp deck on the web
+```c++
+auto obj = get_object<T>();  // get object form thread local pool
+                             // or global pool
+                             // or construct from thread local memory block
+                             // or global memory block
 
----
-
-![bg right 60%](https://icongr.am/octicons/mark-github.svg)
-
-## **[GitHub Pages](https://github.com/pages)**
-
-#### Ready to write & host your deck!
-
-[![Use this as template h:1.5em](https://img.shields.io/badge/-Use%20this%20as%20template-brightgreen?style=for-the-badge&logo=github)](https://github.com/yhatt/marp-cli-example/generate)
+return_object(obj);  // memory is not returned to the system
+```
 
 ---
 
-![bg right 60%](https://www.netlify.com/img/press/logos/logomark.svg)
+# Resource Pool
 
-## **[Netlify](https://www.netlify.com/)**
+1. use `resource_id` to address object
 
-#### Ready to write & host your deck!
+```c++
+ResourceId<T> slot;  // 32-bit global index, ~4 billion
+auto obj = get_resource(&slot);
+obj = address_resource(&slot);
+return_resource(id);  // return resource to global pool
+```
 
-[![Deploy to Netlify h:1.5em](https://www.netlify.com/img/deploy/button.svg)](https://app.netlify.com/start/deploy?repository=https://github.com/yhatt/marp-cli-example)
+2. use `version` to avoid **ABA problem**
 
----
-
-![bg right 60%](https://icongr.am/simple/zeit.svg)
-
-## **[Vercel](https://vercel.com/)**
-
-#### Ready to write & host your deck!
-
-[![Deploy to Vercel h:1.5em](https://vercel.com/button)](https://vercel.com/import/project?template=https://github.com/yhatt/marp-cli-example)
-
----
-
-### <!--fit--> :ok_hand:
+```c++
+uint64_t id = (obj->version << 32) | slot;  // 32-bit version + 32-bit slot
+obj = address_resource(id & 0xFFFFFFFF);  // safe in multi-thread env
+check(obj->version == (id >> 32))  // check version, equal is valid
+++obj->version;  // let all id invalid
+```
 
 ---
 
-![bg 40% opacity blur](https://avatars1.githubusercontent.com/u/3993388?v=4)
+![bg 70%](./assets/resource.svg)
 
-### Created by Yuki Hattori ([@yhatt](https://github.com/yhatt))
+---
 
-https://github.com/yhatt/marp-cli-example
+# **M:N** Thread
+
+- stackful coroutine
+  * libcontext: https://github.com/twlostow/libcontext
+- worker stealing like Golang
+  * avoid coroutine blocking in single thread
+- not hook system function
+  * call yield when block (socket / lock)
+- high-performance and compatible API
+  * build coroutine in hundreds of nanoseconds
+  * all API can be executed normally in a non-coroutine env
+
+---
+
+![bg 70%](./assets/work-stealing.svg)
+
+---
+
+# pthread-like API
+
+```c++
+extern int bthread_start_urgent(bthread_t* __restrict tid,
+                                const bthread_attr_t* __restrict attr,
+                                void * (*fn)(void*),
+                                void* __restrict args);
+
+extern bthread_t bthread_self(void);
+
+extern int bthread_join(bthread_t bt, void** bthread_return);
+
+extern int bthread_yield(void);
+
+...
+```
+
+---
+
+# Butex: futex-like semantics
+
+futex:
+
+```c++
+// wait if *addr1 == expected
+futex(addr1, (FUTEX_WAIT | FUTEX_PRIVATE_FLAG), expected, timeout, NULL, 0);
+
+// wake nwake waiting thread at most
+futex(addr1, (FUTEX_WAKE | FUTEX_PRIVATE_FLAG), nwake, NULL, NULL, 0);
+```
+
+butex:
+
+```c++
+int butex_wait(void* butex, int expected_value, const timespec* abstime);
+
+int butex_wake(void* butex);
+```
+
+---
+
+# Single Connection
+
+at most one connection between client and one server in the process.
+
+* better batching
+* lower overhead
+* **wait-free** write/read
+
+---
+
+![bg 70%](./assets/write3.svg)
+
+---
+
+# Wait-free Read
+
+Parallel on:
+- Each connection
+- Each parsed request
+
+---
+
+# ![bg 70%](./assets/arch.png)
+
+---
+
+# <!--fit--> Thanks
+
+View more details in https://sf-zhou.github.io/#/bRPC
